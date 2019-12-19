@@ -2625,7 +2625,7 @@ public class ScriptRuntime {
         if (!(result instanceof Scriptable)) {
             return false;
         }
-        final Object prop = getObjectProp((Scriptable)result, "done", cx);
+        final Object prop = getObjectProp((Scriptable)result, ES6Iterator.DONE_PROPERTY, cx);
         return toBoolean(prop);
     }
 
