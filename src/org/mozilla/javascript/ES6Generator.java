@@ -95,11 +95,20 @@ public final class ES6Generator extends IdScriptableObject {
 
         switch (id) {
             case Id_return:
-                return generator.resumeReturn(cx, scope, value);
+                if (generator.delegee == null) {
+                    return generator.resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE, value);
+                }
+                return generator.resumeDelegeeReturn(cx, scope, value);
             case Id_next:
-                return generator.resume(cx, scope, value);
+                if (generator.delegee == null) {
+                    return generator.resumeLocal(cx, scope, value);
+                }
+                return generator.resumeDelegee(cx, scope, value);
             case Id_throw:
-                return generator.resumeThrow(cx, scope, value);
+                if (generator.delegee == null) {
+                    return generator.resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, value);
+                }
+                return generator.resumeDelegeeThrow(cx, scope, value);
             case SymbolId_iterator:
                 return thisObj;
             default:
@@ -107,131 +116,101 @@ public final class ES6Generator extends IdScriptableObject {
         }
     }
 
-    private Scriptable resume(Context cx, Scriptable scope, Object value)
+    private Scriptable resumeDelegee(Context cx, Scriptable scope, Object value)
     {
-        if (delegee != null) {
-            try {
-                // Be super-careful and only pass an arg to next if it expects one
-                Object[] nextArgs = Undefined.instance.equals(value) ? ScriptRuntime.emptyArgs
-                        : new Object[] { value };
+        try {
+            // Be super-careful and only pass an arg to next if it expects one
+            Object[] nextArgs = Undefined.instance.equals(value) ? ScriptRuntime.emptyArgs : new Object[] { value };
 
-                Callable nextFn = ScriptRuntime.getPropFunctionAndThis(
-                    delegee, ES6Iterator.NEXT_METHOD, cx, scope);
-                Scriptable nextThis = ScriptRuntime.lastStoredScriptable(cx);
-                Object nr = nextFn.call(cx, scope, nextThis, nextArgs);
+            Callable nextFn = ScriptRuntime.getPropFunctionAndThis(delegee, ES6Iterator.NEXT_METHOD, cx, scope);
+            Scriptable nextThis = ScriptRuntime.lastStoredScriptable(cx);
+            Object nr = nextFn.call(cx, scope, nextThis, nextArgs);
 
-                Scriptable nextResult = ScriptableObject.ensureScriptable(nr);
-                if (ScriptRuntime.isIteratorDone(cx, nextResult)) {
-                    // Iterator is "done".
-                    delegee = null;
-                    // Return a result to the original generator
-                    return resumeLocal(cx, scope, ScriptableObject.getProperty(
-                        nextResult, ES6Iterator.VALUE_PROPERTY));
-                }
-                // Otherwise, we have a normal result and should continue
-                return nextResult;
-
-            } catch (RhinoException re) {
-                // Exceptions from the delegee should be handled by the enclosing
-                // generator, including if they're because functions can't be found.
+            Scriptable nextResult = ScriptableObject.ensureScriptable(nr);
+            if (ScriptRuntime.isIteratorDone(cx, nextResult)) {
+                // Iterator is "done".
                 delegee = null;
-                return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
+                // Return a result to the original generator
+                return resumeLocal(cx, scope, ScriptableObject.getProperty(nextResult, ES6Iterator.VALUE_PROPERTY));
             }
-        }
+            // Otherwise, we have a normal result and should continue
+            return nextResult;
 
-        // If we get here then no delegees had a result or there were no delegees
-        return resumeLocal(cx, scope, value);
+        } catch (RhinoException re) {
+            // Exceptions from the delegee should be handled by the enclosing
+            // generator, including if they're because functions can't be found.
+            delegee = null;
+            return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
+        }
     }
 
-    private Object callReturnOptionally(Context cx, Scriptable scope, Object value) {
-        Object[] retArgs = Undefined.instance.equals(value) ? ScriptRuntime.emptyArgs
-                    : new Object[] { value };
-        // Delegate to "return" method. If it's not defined we ignore it
-        Object retFnObj = ScriptRuntime.getObjectPropNoWarn(
-            delegee, ES6Iterator.RETURN_METHOD, cx, scope);
-        if (!Undefined.instance.equals(retFnObj)) {
-            if (!(retFnObj instanceof Callable)) {
-                throw ScriptRuntime.typeError2("msg.isnt.function", ES6Iterator.RETURN_METHOD,
-                    ScriptRuntime.typeof(retFnObj));
-            }
-            return ((Callable)retFnObj).call(cx, scope, ensureScriptable(delegee), retArgs);
-        }
-        return null;
-    }
-
-    private Scriptable resumeThrow(Context cx, Scriptable scope, Object value) {
+    private Scriptable resumeDelegeeThrow(Context cx, Scriptable scope, Object value) {
         boolean returnCalled = false;
-        if (delegee != null) {
-            try {
-                // Delegate to "throw" method. If it's not defined we'll get an error here.
-                Callable throwFn = ScriptRuntime.getPropFunctionAndThis(delegee, "throw", cx, scope);
-                Scriptable nextThis = ScriptRuntime.lastStoredScriptable(cx);
-                Object throwResult = throwFn.call(cx, scope, nextThis, new Object[] { value });
+        try {
+            // Delegate to "throw" method. If it's not defined we'll get an error here.
+            Callable throwFn = ScriptRuntime.getPropFunctionAndThis(delegee, "throw", cx, scope);
+            Scriptable nextThis = ScriptRuntime.lastStoredScriptable(cx);
+            Object throwResult = throwFn.call(cx, scope, nextThis, new Object[] { value });
 
-                if (ScriptRuntime.isIteratorDone(cx, throwResult)) {
-                    // Iterator is "done".
-                    try {
-                        // Return a result to the original generator, but first optionally call "return"
-                        returnCalled = true;
-                        callReturnOptionally(cx, scope, Undefined.instance);
-                    } finally {
-                        delegee = null;
-                    }
-                    return resumeLocal(cx, scope, 
-                        ScriptRuntime.getObjectProp(throwResult, ES6Iterator.VALUE_PROPERTY, cx, scope));
-                }
-                // Otherwise, we have a normal result and should continue, but without the delegee...
-                return ensureScriptable(throwResult);
-
-            } catch (RhinoException re) {
+            if (ScriptRuntime.isIteratorDone(cx, throwResult)) {
+                // Iterator is "done".
                 try {
-                    if (!returnCalled) {
-                        try {
-                            callReturnOptionally(cx, scope, Undefined.instance);
-                        } catch (RhinoException re2) {
-                            return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re2);
-                        }
-                    }
+                    // Return a result to the original generator, but first optionally call "return"
+                    returnCalled = true;
+                    callReturnOptionally(cx, scope, Undefined.instance);
                 } finally {
                     delegee = null;
                 }
-                return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
+                return resumeLocal(cx, scope,
+                        ScriptRuntime.getObjectProp(throwResult, ES6Iterator.VALUE_PROPERTY, cx, scope));
             }
-        }
+            // Otherwise, we have a normal result and should continue
+            return ensureScriptable(throwResult);
 
-        return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, value);
-    }
-
-    private Scriptable resumeReturn(Context cx, Scriptable scope, Object value) {
-        if (delegee != null) {
+        } catch (RhinoException re) {
+            // Handle all exceptions, including missing methods, by delegating to original.
             try {
-                Object retResult = callReturnOptionally(cx, scope, value);
-                if (retResult != null) {
-                    if (ScriptRuntime.isIteratorDone(cx, retResult)) {
-                        // Iterator is "done".
-                        delegee = null;
-                        // Return a result to the original generator
-                        return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE, 
-                            ScriptRuntime.getObjectPropNoWarn(retResult, ES6Iterator.VALUE_PROPERTY, cx, scope));
-                    } else {
-                        // Not actually done yet!
-                        return ensureScriptable(retResult);
+                if (!returnCalled) {
+                    try {
+                        callReturnOptionally(cx, scope, Undefined.instance);
+                    } catch (RhinoException re2) {
+                        return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re2);
                     }
                 }
-
-                // No "return" -- let the original iterator return the value.
+            } finally {
                 delegee = null;
-                return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE, value);
-
-            } catch (RhinoException re) {
-                // Exceptions from the delegee should be handled by the enclosing
-                // generator, including if they're because functions can't be found.
-                delegee = null;
-                return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
             }
+            return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
         }
+    }
 
-        return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE, value);
+    private Scriptable resumeDelegeeReturn(Context cx, Scriptable scope, Object value) {
+        try {
+            // Call "return" but don't throw if it can't be found
+            Object retResult = callReturnOptionally(cx, scope, value);
+            if (retResult != null) {
+                if (ScriptRuntime.isIteratorDone(cx, retResult)) {
+                    // Iterator is "done".
+                    delegee = null;
+                    // Return a result to the original generator
+                    return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE,
+                            ScriptRuntime.getObjectPropNoWarn(retResult, ES6Iterator.VALUE_PROPERTY, cx, scope));
+                } else {
+                    // Not actually done yet!
+                    return ensureScriptable(retResult);
+                }
+            }
+
+            // No "return" -- let the original iterator return the value.
+            delegee = null;
+            return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_CLOSE, value);
+
+        } catch (RhinoException re) {
+            // Exceptions from the delegee should be handled by the enclosing
+            // generator, including if they're because functions can't be found.
+            delegee = null;
+            return resumeAbruptLocal(cx, scope, NativeGenerator.GENERATOR_THROW, re);
+        }
     }
 
     private Scriptable resumeLocal(Context cx, Scriptable scope, Object value)
@@ -251,9 +230,8 @@ public final class ES6Generator extends IdScriptableObject {
                 NativeGenerator.GENERATOR_SEND, savedState, value);
 
             if (r instanceof YieldStarResult) {
-                state = State.SUSPENDED_YIELD;
-
                 // This special result tells us that we are executing a "yield *"
+                state = State.SUSPENDED_YIELD;
                 YieldStarResult ysResult = (YieldStarResult)r;
                 try {
                     delegee = ScriptRuntime.callIterator(ysResult.getResult(), cx, scope);
@@ -266,10 +244,8 @@ public final class ES6Generator extends IdScriptableObject {
                 Scriptable delResult;
                 try {
                     // Re-execute but update state in case we end up back here
-                    // TODO consider returning a different value from this function
-                    // to avoid recursion.
                     // Value shall be Undefined based on the very complex spec!
-                    delResult = resume(cx, scope, Undefined.instance);
+                    delResult = resumeDelegee(cx, scope, Undefined.instance);
                 } finally {
                     state = State.EXECUTING;
                 }
@@ -379,6 +355,22 @@ public final class ES6Generator extends IdScriptableObject {
             }
         }
         return result;
+    }
+
+    private Object callReturnOptionally(Context cx, Scriptable scope, Object value) {
+        Object[] retArgs = Undefined.instance.equals(value) ? ScriptRuntime.emptyArgs
+                    : new Object[] { value };
+        // Delegate to "return" method. If it's not defined we ignore it
+        Object retFnObj = ScriptRuntime.getObjectPropNoWarn(
+            delegee, ES6Iterator.RETURN_METHOD, cx, scope);
+        if (!Undefined.instance.equals(retFnObj)) {
+            if (!(retFnObj instanceof Callable)) {
+                throw ScriptRuntime.typeError2("msg.isnt.function", ES6Iterator.RETURN_METHOD,
+                    ScriptRuntime.typeof(retFnObj));
+            }
+            return ((Callable)retFnObj).call(cx, scope, ensureScriptable(delegee), retArgs);
+        }
+        return null;
     }
 
     @Override
